@@ -6,7 +6,7 @@ Access: context.preferences.addons[__package__].preferences
 """
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, FloatProperty, StringProperty
 
 
 def get_addon_name() -> str:
@@ -25,6 +25,22 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
         default=13,
         min=8,
         max=32,
+    )  # type: ignore
+
+    line_spacing: FloatProperty(
+        name="Line Spacing",
+        description="Line height as a multiple of the font size",
+        default=1.35,
+        min=1.0,
+        max=2.5,
+    )  # type: ignore
+
+    letter_spacing: FloatProperty(
+        name="Letter Spacing",
+        description="Extra space between characters, in pixels",
+        default=0.0,
+        min=0.0,
+        max=10.0,
     )  # type: ignore
 
     theme: EnumProperty(
@@ -68,6 +84,8 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
 
         col = layout.column(align=True)
         col.prop(self, "font_size")
+        col.prop(self, "line_spacing")
+        col.prop(self, "letter_spacing")
         col.prop(self, "theme")
         col.prop(self, "shell")
         col.prop(self, "max_scrollback")

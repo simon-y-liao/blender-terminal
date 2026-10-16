@@ -49,7 +49,7 @@ class BAT_MT_terminal_usage(Menu):
         layout = self.layout
         layout.label(text="Click inside the terminal to focus and type.", icon="MOUSE_LMB")
         layout.separator()
-        layout.label(text="Cmd+T / Ctrl+T — Toggle floating window")
+        layout.label(text="Cmd+T / Win+T — Toggle floating window")
         layout.label(text="Ctrl+C — Interrupt process")
         layout.label(text="Ctrl+D — Send EOF")
         layout.label(text="Ctrl+L — Clear screen")

@@ -104,6 +104,7 @@ class TerminalSession:
 
         if ok:
             self._backend = backend
+            self.screen.response_handler = backend.write
             log.info("Session %s started: %s", self.session_id, cmd)
         else:
             self.status = SessionStatus.ERROR
