@@ -142,9 +142,9 @@ def _get_font_size(context: bpy.types.Context) -> int:
     try:
         from ..blender.preferences import get_prefs
         prefs = get_prefs(context)
-        return prefs.font_size if prefs else 13
+        return prefs.font_size if prefs else 28
     except Exception:
-        return 13
+        return 28
 
 
 def _get_ui_scale(context: bpy.types.Context) -> float:

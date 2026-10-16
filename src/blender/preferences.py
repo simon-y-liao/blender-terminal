@@ -22,7 +22,7 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
     font_size: IntProperty(
         name="Font Size",
         description="Terminal font size in points",
-        default=13,
+        default=28,
         min=8,
         max=32,
     )  # type: ignore

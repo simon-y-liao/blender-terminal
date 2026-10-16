@@ -538,7 +538,7 @@ def _mouse_to_col_row(context, event, session, region=None):
         prefs = get_prefs(context)
         font_size = prefs.font_size
     except Exception:
-        font_size = 13
+        font_size = 28
         
     from ..ui.terminal_draw import _measure_char
     char_w, char_h = _measure_char(font_size, context.preferences.view.ui_scale * context.preferences.system.pixel_size)
@@ -570,7 +570,7 @@ def _estimate_term_size(context: bpy.types.Context):
         prefs = get_prefs(context)
         font_size = prefs.font_size
     except Exception:
-        font_size = 13
+        font_size = 28
 
     from ..ui.terminal_draw import _measure_char
     char_w, char_h = _measure_char(font_size, context.preferences.view.ui_scale * context.preferences.system.pixel_size)
