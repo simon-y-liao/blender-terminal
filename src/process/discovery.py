@@ -90,7 +90,22 @@ def get_default_shell() -> str:
     Return the user's preferred interactive shell.
     Falls back to /bin/sh on Unix, cmd.exe on Windows.
     """
+    # User preference (Preferences > Extensions > Default Shell) wins
+    try:
+        import bpy
+        root = __package__.rsplit(".src.", 1)[0]
+        pref = bpy.context.preferences.addons[root].preferences.shell.strip()
+        if pref:
+            return find_executable(pref) or pref
+    except Exception:
+        pass
+
     if sys.platform == "win32":
+        # Prefer PowerShell 7, then Windows PowerShell, then cmd
+        for name in ("pwsh.exe", "powershell.exe"):
+            found = find_executable(name)
+            if found:
+                return found
         return os.environ.get("COMSPEC", "cmd.exe")
 
     # On macOS/Linux prefer SHELL env variable
@@ -137,7 +152,7 @@ def get_user_env() -> Dict[str, str]:
 
         
         # Prepend our bin_dir to PATH so bpy-exec and wrappers are immediately available
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
     except Exception as e:
         log.error("Failed to start IPC server: %s", e)
 

@@ -33,6 +33,18 @@ def ensure_manager() -> "TerminalManager":
     return _manager_instance
 
 
+def _kill_all_at_exit() -> None:
+    try:
+        if _manager_instance is not None:
+            _manager_instance.destroy_all()
+    except Exception:
+        pass
+
+
+import atexit as _atexit
+_atexit.register(_kill_all_at_exit)
+
+
 def destroy_manager() -> None:
     """Kill all sessions and destroy the manager (called on unregister)."""
     global _manager_instance

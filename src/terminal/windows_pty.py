@@ -63,15 +63,20 @@ class WindowsPTYBackend(TerminalBackend):
         cwd: Optional[str] = None,
     ) -> bool:
         try:
+            import os
+            import shutil
             import subprocess
-            cmd_str = subprocess.list2cmdline(cmd)
+
+            env = dict(env) if env else dict(os.environ)
+            exe = shutil.which(cmd[0], path=env.get("PATH")) or cmd[0]
+            cmdline = (" " + subprocess.list2cmdline(cmd[1:])) if len(cmd) > 1 else None
+            env_str = "\0".join(f"{k}={v}" for k, v in env.items()) + "\0"
 
             self._pty = self._winpty.PTY(cols, rows)
-            self._pty.spawn(
-                cmd_str,
-                cwd=cwd,
-                env=env,
-            )
+            if cmdline:
+                self._pty.spawn(exe, cmdline=cmdline, cwd=cwd or os.getcwd(), env=env_str)
+            else:
+                self._pty.spawn(exe, cwd=cwd or os.getcwd(), env=env_str)
 
             self._reader_thread = threading.Thread(
                 target=self._reader_loop,
@@ -80,17 +85,20 @@ class WindowsPTYBackend(TerminalBackend):
             )
             self._reader_thread.start()
 
-            log.info("Started Windows ConPTY process: %s", cmd_str)
+            log.info("Started Windows ConPTY process: %s", exe)
             return True
 
         except Exception as exc:
             log.error("Failed to start Windows ConPTY process %s: %s", cmd, exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return False
 
     def write(self, data: bytes) -> None:
         if self._pty is None:
             return
         try:
+            if isinstance(data, (bytes, bytearray)):
+                data = bytes(data).decode("utf-8", errors="replace")
             self._pty.write(data)
         except Exception as exc:
             log.debug("ConPTY write error: %s", exc)
@@ -105,13 +113,31 @@ class WindowsPTYBackend(TerminalBackend):
             log.debug("ConPTY resize error: %s", exc)
 
     def kill(self) -> None:
-        if self._pty is None:
+        """Terminate the shell and everything started from it (e.g. claude/node)."""
+        pty = self._pty
+        if pty is None:
             return
+        self._pty = None
+        pid = None
         try:
-            self._pty.close()
+            pid = pty.pid
         except Exception:
             pass
-        self._pty = None
+        if pid:
+            try:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout=5,
+                )
+            except Exception as exc:
+                log.debug("taskkill failed: %s", exc)
+        try:
+            pty.cancel_io()  # unblock the reader thread
+        except Exception:
+            pass
 
     def is_alive(self) -> bool:
         if self._pty is None:
@@ -137,12 +163,12 @@ class WindowsPTYBackend(TerminalBackend):
         log.debug("Windows reader thread started")
         while self._pty is not None:
             try:
-                data = self._pty.read(4096, blocking=True)
+                data = self._pty.read(blocking=True)
                 if data:
                     if isinstance(data, str):
                         data = data.encode("utf-8", errors="replace")
                     self._on_output(data)
-                else:
+                elif self._pty is None or self._pty.iseof():
                     break
             except Exception:
                 break

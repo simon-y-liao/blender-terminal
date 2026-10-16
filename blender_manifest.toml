@@ -15,10 +15,14 @@ blender_version_min = "4.2.0"
 
 license = ["SPDX:GPL-3.0-or-later"]
 
-# Bundled Python wheels (pure Python — compatible with all platforms)
+# Bundled Python wheels (pyte/wcwidth are pure Python; pywinpty is Windows-only)
 wheels = [
     "./wheels/pyte-0.8.0-py2.py3-none-any.whl",
     "./wheels/wcwidth-0.8.3-py3-none-any.whl",
+    # Windows ConPTY backend (Blender picks the wheel matching its Python)
+    "./wheels/pywinpty-3.1.0-cp311-cp311-win_amd64.whl",
+    "./wheels/pywinpty-3.1.0-cp312-cp312-win_amd64.whl",
+    "./wheels/pywinpty-3.1.0-cp313-cp313-win_amd64.whl",
 ]
 
 # Target platforms — Blender uses "os-arch" string format

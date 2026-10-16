@@ -11,6 +11,7 @@ import os
 import queue
 import stat
 import sys
+import tempfile
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -126,7 +127,7 @@ def generate_bpy_exec(port: int) -> str:
     Generates the CLI bridge script `bpy-exec` and returns the directory 
     it is stored in, so it can be added to the PATH.
     """
-    bin_dir = "/tmp/bat_ipc_bin"
+    bin_dir = os.path.join(tempfile.gettempdir(), "bat_ipc_bin")
     os.makedirs(bin_dir, exist_ok=True)
     path = os.path.join(bin_dir, "bpy-exec")
     

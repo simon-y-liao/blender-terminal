@@ -107,7 +107,7 @@ class TerminalSession:
             log.info("Session %s started: %s", self.session_id, cmd)
         else:
             self.status = SessionStatus.ERROR
-            self._inject_error(f"Failed to start: {' '.join(cmd)}")
+            self._inject_error(f"Failed to start: {' '.join(cmd)} ({getattr(backend, 'last_error', '')})")
 
         return ok
 
