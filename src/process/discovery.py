@@ -128,11 +128,12 @@ def get_user_env() -> Dict[str, str]:
 
     # ─── Start IPC Server & Inject bridge ───
     try:
-        from ..core.ipc import start_ipc_server, generate_bpy_exec
+        from ..core.ipc import start_ipc_server, generate_bpy_exec, get_ipc_token
         port = start_ipc_server()
         bin_dir = generate_bpy_exec(port)
         
         env["BLENDER_IPC_PORT"] = str(port)
+        env["BLENDER_IPC_TOKEN"] = get_ipc_token()
         
 
         

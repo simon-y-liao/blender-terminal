@@ -500,39 +500,8 @@ class BAT_OT_update_extension(bpy.types.Operator):
     bl_description = "Download and install the latest OTA update from GitHub"
 
     def execute(self, context: bpy.types.Context):
-        import urllib.request
-        import zipfile
-        import tempfile
-        import shutil
-
-        url = "https://github.com/piy-ushk/blender-terminal/archive/refs/heads/main.zip"
-        pkg_path = Path(__file__).parent.parent.parent
-
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                zip_path = Path(tmpdir) / "update.zip"
-                urllib.request.urlretrieve(url, zip_path)
-                
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(tmpdir)
-                    
-                src_dir = Path(tmpdir) / "blender-terminal-main"
-                
-                # Copy files over, overwriting existing ones
-                for root, _, files in os.walk(src_dir):
-                    rel_path = os.path.relpath(root, src_dir)
-                    dst_dir = pkg_path / rel_path
-                    dst_dir.mkdir(parents=True, exist_ok=True)
-                    for f in files:
-                        shutil.copy2(os.path.join(root, f), dst_dir / f)
-
-            self.report({"INFO"}, "Update complete! Please RESTART Blender.")
-            
-        except Exception as e:
-            log.error("Update failed: %s", e)
-            self.report({"ERROR"}, f"Update failed: {e}")
-            
-        return {"FINISHED"}
+        self.report({"INFO"}, "Online update disabled in this build. Install updates manually.")
+        return {"CANCELLED"}
 
 
 # ─── BAT_OT_toggle_terminal_window ────────────────────────────────────────────

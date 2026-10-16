@@ -9,6 +9,7 @@ import io
 import json
 import os
 import queue
+import secrets
 import stat
 import sys
 import threading
@@ -32,6 +33,11 @@ class ExecRequest:
 
 
 _exec_queue: queue.Queue = queue.Queue()
+_ipc_token: str = secrets.token_hex(32)
+
+
+def get_ipc_token() -> str:
+    return _ipc_token
 
 
 def _process_queue() -> float:
@@ -63,6 +69,10 @@ def _process_queue() -> float:
 class IPCHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/exec":
+            if not secrets.compare_digest(self.headers.get("X-BAT-Token", ""), _ipc_token):
+                self.send_response(403)
+                self.end_headers()
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8")
             data = json.loads(body)
@@ -131,7 +141,7 @@ def generate_bpy_exec(port: int) -> str:
     path = os.path.join(bin_dir, "bpy-exec")
     
     script = f"""#!/usr/bin/env python3
-import sys, urllib.request, json
+import sys, os, urllib.request, json
 
 if len(sys.argv) > 1:
     code = " ".join(sys.argv[1:])
@@ -141,7 +151,7 @@ else:
 req = urllib.request.Request(
     "http://127.0.0.1:{port}/exec",
     data=json.dumps({{"code": code}}).encode("utf-8"),
-    headers={{"Content-Type": "application/json"}},
+    headers={{"Content-Type": "application/json", "X-BAT-Token": os.environ.get("BLENDER_IPC_TOKEN", "")}},
     method="POST"
 )
 try:

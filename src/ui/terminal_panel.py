@@ -34,7 +34,6 @@ class BAT_MT_terminal_menu(Menu):
             layout.operator("bat.kill_process", text="Kill Process", icon="X")
         
         layout.separator()
-        layout.operator("bat.update_extension", text="Sync Updates", icon="FILE_REFRESH")
         
         layout.separator()
         layout.menu("BAT_MT_terminal_usage", text="Usage", icon="QUESTION")
