@@ -61,48 +61,85 @@ _SCROLL_UP_KEYS: Set[str] = {"WHEELUPMOUSE", "TRACKPADPAN"}
 _SCROLL_DOWN_KEYS: Set[str] = {"WHEELDOWNMOUSE"}
 
 
+_CSI_LETTER_KEYS = {
+    "UP_ARROW": "A", "DOWN_ARROW": "B", "RIGHT_ARROW": "C", "LEFT_ARROW": "D",
+    "HOME": "H", "END": "F",
+}
+_CSI_TILDE_KEYS = {
+    "INSERT": 2, "DEL": 3, "PAGE_UP": 5, "PAGE_DOWN": 6,
+    "F5": 15, "F6": 17, "F7": 18, "F8": 19, "F9": 20, "F10": 21, "F11": 23, "F12": 24,
+}
+_SS3_KEYS = {"F1": "P", "F2": "Q", "F3": "R", "F4": "S"}
+
+
+def _mod_param(event) -> int:
+    """xterm modifier parameter: 1 + Shift(1) + Alt(2) + Ctrl(4)."""
+    return 1 + (1 if event.shift else 0) + (2 if event.alt else 0) + (4 if event.ctrl else 0)
+
+
 def _event_to_bytes(event) -> Optional[bytes]:
     """
-    Convert a Blender keyboard event to the bytes to write to the PTY.
+    Convert a Blender keyboard event to the bytes Windows Terminal would send.
     Returns None if the event should be ignored.
     """
     key = event.type
+    if event.oskey:
+        return None
+    mod = _mod_param(event)
 
-    # Ctrl+C → SIGINT (Check explicitly for Ctrl, not Cmd/OSKey on Mac)
-    if key == "C" and event.ctrl and not event.shift and not event.alt and not event.oskey:
-        return b"\x03"
-    # Ctrl+D → EOF
-    if key == "D" and event.ctrl and not event.shift and not event.alt and not event.oskey:
-        return b"\x04"
-    # Ctrl+L → clear screen
-    if key == "L" and event.ctrl and not event.shift and not event.alt and not event.oskey:
-        return b"\x0c"
-    # Ctrl+Z → suspend
-    if key == "Z" and event.ctrl and not event.shift and not event.alt and not event.oskey:
-        return b"\x1a"
-    # Ctrl+A → beginning of line
-    if key == "A" and event.ctrl and not event.shift and not event.alt:
-        return b"\x01"
-    # Ctrl+E → end of line
-    if key == "E" and event.ctrl and not event.shift and not event.alt:
-        return b"\x05"
-    # Ctrl+K → kill to end of line
-    if key == "K" and event.ctrl and not event.shift and not event.alt:
-        return b"\x0b"
-    # Ctrl+U → kill to beginning of line
-    if key == "U" and event.ctrl and not event.shift and not event.alt:
-        return b"\x15"
+    # Enter (Shift+Enter uses win32-input-mode so ConPTY sees the Shift, like Windows Terminal)
+    if key in {"RET", "NUMPAD_ENTER"}:
+        if event.shift and not event.ctrl and not event.alt:
+            return b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_"
+        return b"\x1b\r" if event.alt else b"\r"
+    if key == "TAB":
+        return b"\x1b[Z" if event.shift else b"\t"
+    if key == "BACK_SPACE":
+        if event.ctrl:
+            return b"\x08"
+        return b"\x1b\x7f" if event.alt else b"\x7f"
+    if key == "ESC":
+        return b"\x1b"
+    if key in _CSI_LETTER_KEYS:
+        ch = _CSI_LETTER_KEYS[key]
+        return (f"\x1b[1;{mod}{ch}" if mod > 1 else f"\x1b[{ch}").encode()
+    if key in _CSI_TILDE_KEYS:
+        n = _CSI_TILDE_KEYS[key]
+        return (f"\x1b[{n};{mod}~" if mod > 1 else f"\x1b[{n}~").encode()
+    if key in _SS3_KEYS:
+        ch = _SS3_KEYS[key]
+        return (f"\x1b[1;{mod}{ch}" if mod > 1 else f"\x1bO{ch}").encode()
 
-    if key in _KEY_TO_BYTES:
-        return _KEY_TO_BYTES[key]
+    # AltGr (reported by Windows as Ctrl+Alt) produces printable characters
+    # on German and other layouts: \\ @ { } [ ] | ~ \u20ac
+    if event.ctrl and event.alt and event.unicode and event.unicode.isprintable():
+        return event.unicode.encode("utf-8")
 
-    # Printable character via event.unicode
-    if event.unicode and not event.ctrl and not event.alt and not event.oskey:
-        char = event.unicode
-        if char:
-            return char.encode("utf-8")
+    # Ctrl+letter / Ctrl+Space and friends -> control characters
+    if event.ctrl and not event.shift:
+        prefix = b"\x1b" if event.alt else b""
+        if len(key) == 1 and "A" <= key <= "Z":
+            return prefix + bytes([ord(key) - 64])
+        special = {"SPACE": 0, "LEFT_BRACKET": 27, "BACK_SLASH": 28,
+                   "RIGHT_BRACKET": 29, "SLASH": 31, "MINUS": 31}
+        if key in special:
+            return prefix + bytes([special[key]])
+
+    # Printable character (works for any keyboard layout, incl. German)
+    if event.unicode and not event.ctrl:
+        data = event.unicode.encode("utf-8")
+        return b"\x1b" + data if event.alt else data
 
     return None
+
+
+def _paste_bytes(session, text: str) -> bytes:
+    """Clipboard text -> PTY bytes, using bracketed paste when the app enabled it."""
+    text = text.replace("\r\n", "\r").replace("\n", "\r")
+    data = text.encode("utf-8")
+    if session.screen.bracketed_paste:
+        data = b"\x1b[200~" + data + b"\x1b[201~"
+    return data
 
 
 # ─── BAT_OT_open_terminal ─────────────────────────────────────────────────────
@@ -326,6 +363,28 @@ class BAT_OT_input_modal(bpy.types.Operator):
 
         # ── Mouse Interaction (Scrolling & Selection) ─────────────────────
         if context.region and context.region.type == "WINDOW":
+            is_wheel = event.type in (_SCROLL_UP_KEYS | _SCROLL_DOWN_KEYS) and event.type != "TRACKPADPAN"
+            up = event.type in _SCROLL_UP_KEYS
+
+            # 1. Program wants mouse events (e.g. Claude Code full-screen view):
+            #    send the wheel to it, exactly like Windows Terminal does
+            if is_wheel and session.screen.mouse_reporting:
+                col, row = _mouse_to_col_row(context, event, session)
+                btn = 64 if up else 65
+                if session.screen.mouse_sgr:
+                    seq = f"\x1b[<{btn};{col + 1};{row + 1}M".encode()
+                else:
+                    seq = bytes([0x1b, 0x5b, 0x4d, 32 + btn,
+                                 min(255, 33 + col), min(255, 33 + row)])
+                session.send_input(seq)
+                return {"RUNNING_MODAL"}
+
+            # 2. Full-screen program without mouse support: wheel = arrow keys
+            if is_wheel and session.screen.in_alt_screen:
+                session.send_input((b"\x1b[A" if up else b"\x1b[B") * 3)
+                return {"RUNNING_MODAL"}
+
+            # 3. Normal shell: scroll the terminal's own history
             if event.type in _SCROLL_UP_KEYS:
                 if event.type == "TRACKPADPAN":
                     delta = event.mouse_y - event.mouse_prev_y
@@ -333,12 +392,12 @@ class BAT_OT_input_modal(bpy.types.Operator):
                 else:
                     session.screen.scroll_up(3)
                 context.area.tag_redraw()
-                return {"PASS_THROUGH"}
+                return {"RUNNING_MODAL"}
 
             if event.type in _SCROLL_DOWN_KEYS:
                 session.screen.scroll_down(3)
                 context.area.tag_redraw()
-                return {"PASS_THROUGH"}
+                return {"RUNNING_MODAL"}
 
             # Text selection
             if event.type == "LEFTMOUSE":
@@ -354,6 +413,10 @@ class BAT_OT_input_modal(bpy.types.Operator):
                         self._is_selecting = False
                         col, row = _mouse_to_col_row(context, event, session)
                         session.screen.selection_end = (col, row)
+                        # A plain click (no drag) is not a selection
+                        if session.screen.selection_start == session.screen.selection_end:
+                            session.screen.selection_start = None
+                            session.screen.selection_end = None
                         context.area.tag_redraw()
                     return {"PASS_THROUGH"}
 
@@ -363,21 +426,37 @@ class BAT_OT_input_modal(bpy.types.Operator):
                 context.area.tag_redraw()
                 return {"PASS_THROUGH"}
 
+        # IME / composed text input (e.g. Chinese input method)
+        if event.type == "TEXTINPUT" and event.unicode:
+            if getattr(wm, "bat_terminal_focused", True):
+                session.send_input(event.unicode.encode("utf-8"))
+                session.screen.scroll_to_bottom()
+                return {"RUNNING_MODAL"}
+            return {"PASS_THROUGH"}
+
         # Only act on PRESS events for keyboard keys
         if event.value not in {"PRESS"}:
+            return {"PASS_THROUGH"}
+
+        if not getattr(wm, "bat_terminal_focused", True):
             return {"PASS_THROUGH"}
 
         # ── Copy / Paste ──────────────────────────────────────────────────
         is_mac = sys.platform == "darwin"
         
         # COPY: Cmd+C (Mac) or Ctrl+Shift+C (Win/Linux)
-        is_copy = (event.type == "C" and 
-                   ((is_mac and event.oskey) or 
-                    (not is_mac and event.ctrl and event.shift)))
+        # Like Windows Terminal: Ctrl+Shift+C always copies, plain Ctrl+C copies
+        # only when there is a selection (otherwise it interrupts the program)
+        has_sel = bool(session.screen.get_selection_text())
+        is_copy = (event.type == "C" and not event.alt and
+                   ((is_mac and event.oskey) or
+                    (not is_mac and event.ctrl and (event.shift or has_sel))))
         if is_copy:
             text = session.screen.get_selection_text()
             if text:
                 context.window_manager.clipboard = text
+                session.screen.selection_start = session.screen.selection_end = None
+                context.area.tag_redraw()
                 self.report({"INFO"}, "Terminal selection copied to clipboard")
             else:
                 # Fallback MVP: Copy the entire visible screen to clipboard
@@ -389,20 +468,22 @@ class BAT_OT_input_modal(bpy.types.Operator):
             return {"RUNNING_MODAL"}
 
         # PASTE: Cmd+V (Mac) or Ctrl+Shift+V (Win/Linux)
-        is_paste = (event.type == "V" and 
-                    ((is_mac and event.oskey) or 
-                     (not is_mac and event.ctrl and event.shift)))
+        # Ctrl+V and Ctrl+Shift+V both paste, like Windows Terminal
+        is_paste = (event.type == "V" and not event.alt and
+                    ((is_mac and event.oskey) or
+                     (not is_mac and event.ctrl)))
         if is_paste:
             text = context.window_manager.clipboard
             if text:
-                # Send text directly, converting newlines to \r
-                session.send_input(text.replace("\n", "\r").encode("utf-8"))
+                session.send_input(_paste_bytes(session, text))
+                session.screen.scroll_to_bottom()
             return {"RUNNING_MODAL"}
 
         # ── ESC — confirm close (don't accidentally close with ESC) ───────
         if event.type == "ESC" and not event.ctrl:
             # Send ESC to the process (e.g., vim needs it)
             session.send_input(b"\x1b")
+            session.screen.selection_start = session.screen.selection_end = None
             return {"RUNNING_MODAL"}
 
         # ── Regular key → PTY (Replaces local history) ─────────────────────
@@ -430,13 +511,14 @@ class BAT_OT_input_modal(bpy.types.Operator):
 def _mouse_to_col_row(context, event, session):
     """Convert absolute screen coordinates to terminal (col, row)."""
     try:
-        prefs = context.preferences.addons[__package__.split(".")[0]].preferences
+        from .preferences import get_prefs
+        prefs = get_prefs(context)
         font_size = prefs.font_size
     except Exception:
         font_size = 13
         
-    char_w = font_size * 0.60
-    char_h = font_size * 1.40
+    from ..ui.terminal_draw import _measure_char
+    char_w, char_h = _measure_char(font_size, context.preferences.view.ui_scale * context.preferences.system.pixel_size)
     
     pad_x = 10
     pad_y = 10
@@ -461,15 +543,14 @@ def _estimate_term_size(context: bpy.types.Context):
     Uses a monospace character cell approximation.
     """
     try:
-        prefs = context.preferences.addons[
-            __package__.split(".")[0]
-        ].preferences
+        from .preferences import get_prefs
+        prefs = get_prefs(context)
         font_size = prefs.font_size
     except Exception:
         font_size = 13
 
-    char_w = font_size * 0.60   # approximate monospace cell width
-    char_h = font_size * 1.40   # approximate line height
+    from ..ui.terminal_draw import _measure_char
+    char_w, char_h = _measure_char(font_size, context.preferences.view.ui_scale * context.preferences.system.pixel_size)
 
     area = context.area
     if area:
@@ -500,39 +581,8 @@ class BAT_OT_update_extension(bpy.types.Operator):
     bl_description = "Download and install the latest OTA update from GitHub"
 
     def execute(self, context: bpy.types.Context):
-        import urllib.request
-        import zipfile
-        import tempfile
-        import shutil
-
-        url = "https://github.com/piy-ushk/blender-terminal/archive/refs/heads/main.zip"
-        pkg_path = Path(__file__).parent.parent.parent
-
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                zip_path = Path(tmpdir) / "update.zip"
-                urllib.request.urlretrieve(url, zip_path)
-                
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(tmpdir)
-                    
-                src_dir = Path(tmpdir) / "blender-terminal-main"
-                
-                # Copy files over, overwriting existing ones
-                for root, _, files in os.walk(src_dir):
-                    rel_path = os.path.relpath(root, src_dir)
-                    dst_dir = pkg_path / rel_path
-                    dst_dir.mkdir(parents=True, exist_ok=True)
-                    for f in files:
-                        shutil.copy2(os.path.join(root, f), dst_dir / f)
-
-            self.report({"INFO"}, "Update complete! Please RESTART Blender.")
-            
-        except Exception as e:
-            log.error("Update failed: %s", e)
-            self.report({"ERROR"}, f"Update failed: {e}")
-            
-        return {"FINISHED"}
+        self.report({"INFO"}, "Online update disabled in this build. Install updates manually.")
+        return {"CANCELLED"}
 
 
 # ─── BAT_OT_toggle_terminal_window ────────────────────────────────────────────

@@ -23,6 +23,7 @@ log = get_logger("terminal.screen")
 # We map to RGBA tuples (0.0–1.0) matching a dark terminal theme.
 _DEFAULT_FG = (0.85, 0.85, 0.85, 1.0)   # light grey
 _DEFAULT_BG = (0.0, 0.0, 0.0, 0.0)      # transparent (background rect drawn separately)
+_REVERSE_FG = (0.10, 0.10, 0.10, 1.0)   # text colour for inverse cells with default background
 
 # ANSI 16 colors — dark terminal palette
 _ANSI_COLORS = {
@@ -36,7 +37,7 @@ _ANSI_COLORS = {
     "cyan":          (0.20, 0.75, 0.75, 1.0),
     "white":         (0.80, 0.80, 0.80, 1.0),
     # Bright variants
-    "brightblack":   (0.35, 0.35, 0.35, 1.0),
+    "brightblack":   (0.55, 0.55, 0.55, 1.0),
     "brightred":     (1.00, 0.35, 0.35, 1.0),
     "brightgreen":   (0.50, 1.00, 0.50, 1.0),
     "brightyellow":  (1.00, 1.00, 0.40, 1.0),
@@ -48,6 +49,24 @@ _ANSI_COLORS = {
     "yellow":        (1.00, 1.00, 0.40, 1.0),
     "default":       _DEFAULT_FG,
 }
+
+
+def _patch_pyte_bright_colors() -> None:
+    """pyte 0.8 maps bright colors (SGR 90-97/100-107) to the normal ones, so
+    dark gray (90, used by PowerShell for parameters like --continue) became
+    black and was invisible on a dark background. Keep them distinct."""
+    try:
+        import pyte.graphics as g
+        names = ["brightblack", "brightred", "brightgreen", "brightyellow",
+                 "brightblue", "brightmagenta", "brightcyan", "brightwhite"]
+        for i, n in enumerate(names):
+            g.FG_AIXTERM[90 + i] = n
+            g.BG_AIXTERM[100 + i] = n
+    except Exception:
+        pass
+
+
+_patch_pyte_bright_colors()
 
 
 def resolve_color(color_spec, default: Tuple) -> Tuple:
@@ -65,11 +84,12 @@ def resolve_color(color_spec, default: Tuple) -> Tuple:
         name = color_spec.lower()
         if name in _ANSI_COLORS:
             return _ANSI_COLORS[name]
-        if name.startswith("#") and len(name) == 7:
+        hexs = name[1:] if name.startswith("#") else name
+        if len(hexs) == 6:
             try:
-                r = int(name[1:3], 16) / 255.0
-                g = int(name[3:5], 16) / 255.0
-                b = int(name[5:7], 16) / 255.0
+                r = int(hexs[0:2], 16) / 255.0
+                g = int(hexs[2:4], 16) / 255.0
+                b = int(hexs[4:6], 16) / 255.0
                 return (r, g, b, 1.0)
             except ValueError:
                 pass
@@ -110,6 +130,9 @@ class RenderedChar:
     bg: Tuple = field(default_factory=lambda: _DEFAULT_BG)
     bold: bool = False
     italics: bool = False
+    underline: bool = False
+    has_bg: bool = False      # True when the cell has a non-default background
+    wide_tail: bool = False   # right half of a double-width (CJK) character
 
 
 # A rendered line is a list of RenderedChar (length = screen width)
@@ -141,6 +164,10 @@ class TerminalScreen:
         self.selection_start: Optional[Tuple[int, int]] = None
         self.selection_end: Optional[Tuple[int, int]] = None
 
+        # Callback that sends terminal replies (cursor position, device
+        # attributes) back to the program; set by TerminalSession.
+        self.response_handler = None
+
         self._init_pyte()
 
     @property
@@ -154,17 +181,83 @@ class TerminalScreen:
     def _init_pyte(self) -> None:
         import pyte
         self._screen = pyte.HistoryScreen(self._cols, self._rows, history=self._max_scrollback)
+        self._pushed_lines = 0
+        screen = self._screen
+        orig_index = screen.index
+
+        self._alt_saved = None  # (buffer copy, cursor) while the alternate screen is active
+
+        def _counting_index(*a, **kw):
+            top = screen.history.top
+            last = top[-1] if top else None
+            orig_index(*a, **kw)
+            if top and top[-1] is not last:
+                if self._alt_saved is not None:
+                    top.pop()  # full-screen apps must not pollute scrollback
+                else:
+                    self._pushed_lines += 1
+
+        _ALT_MODES = {47, 1047, 1049}
+        orig_set_mode = screen.set_mode
+        orig_reset_mode = screen.reset_mode
+
+        def _set_mode(*modes, **kw):
+            if kw.get("private") and _ALT_MODES.intersection(modes) and self._alt_saved is None:
+                import copy
+                saved_buffer = {y: row.copy() for y, row in screen.buffer.items()}
+                self._alt_saved = (saved_buffer, copy.copy(screen.cursor))
+                self._scroll_offset = 0
+                screen.erase_in_display(2)
+                modes = tuple(m for m in modes if m not in _ALT_MODES)
+                if not modes:
+                    return
+            orig_set_mode(*modes, **kw)
+
+        def _reset_mode(*modes, **kw):
+            if kw.get("private") and _ALT_MODES.intersection(modes) and self._alt_saved is not None:
+                saved_buffer, saved_cursor = self._alt_saved
+                self._alt_saved = None
+                screen.buffer.clear()
+                screen.buffer.update(saved_buffer)
+                screen.cursor = saved_cursor
+                screen.dirty.update(range(screen.lines))
+                modes = tuple(m for m in modes if m not in _ALT_MODES)
+                if not modes:
+                    return
+            orig_reset_mode(*modes, **kw)
+
+        screen.set_mode = _set_mode
+        screen.reset_mode = _reset_mode
+
+        # Create the parser last: pyte binds handler methods when the stream attaches
         self._stream = pyte.ByteStream(self._screen)
+
+        screen.index = _counting_index
+
+        def _reply(data):
+            handler = self.response_handler
+            if handler and data:
+                try:
+                    handler(data.encode("utf-8") if isinstance(data, str) else data)
+                except Exception as exc:
+                    log.debug("terminal reply failed: %s", exc)
+
+        screen.write_process_input = _reply
         log.debug("pyte history screen initialized (%d×%d)", self._cols, self._rows)
 
     def feed(self, data: bytes) -> None:
         """Feed raw PTY bytes into pyte. Called on the main thread."""
         if not data:
             return
+        self._pushed_lines = 0
         try:
             self._stream.feed(data)
         except Exception as exc:
             log.debug("pyte feed error: %s", exc)
+        # Keep the view still while the user is reading scrollback
+        if self._scroll_offset > 0 and self._pushed_lines:
+            top_len = len(self._screen.history.top)
+            self._scroll_offset = min(self._scroll_offset + self._pushed_lines, top_len)
 
     def resize(self, cols: int, rows: int) -> None:
         """Resize the pyte screen. Called when the Blender area resizes."""
@@ -202,16 +295,28 @@ class TerminalScreen:
     def _pyte_char_to_rendered(self, char) -> RenderedChar:
         """Convert a pyte.screens.Char to our RenderedChar."""
         fg = resolve_color(char.fg, _DEFAULT_FG)
-        bg = resolve_color(char.bg, _DEFAULT_BG)
-        if char.bold:
-            # Brighten foreground for bold text
+        # Windows/ConPTY often paints the console's black background explicitly;
+        # like Windows Terminal, treat palette black as "no background"
+        bg_default = char.bg in (None, "default", "black", "000000", "0c0c0c")
+        bg = _DEFAULT_BG if bg_default else resolve_color(char.bg, _DEFAULT_BG)
+        if char.bold and char.fg in (None, "default"):
+            # Brighten default foreground for bold text
             fg = tuple(min(1.0, c * 1.3) if i < 3 else c for i, c in enumerate(fg))
+        has_bg = not bg_default
+        if getattr(char, "reverse", False):
+            # Inverse video: swap foreground and background
+            new_bg = fg
+            new_fg = bg if has_bg else _REVERSE_FG
+            fg, bg, has_bg = new_fg, new_bg, True
         return RenderedChar(
-            char=char.data or " ",
+            char=char.data if char.data else "",
             fg=fg,
             bg=bg,
             bold=char.bold,
             italics=char.italics,
+            underline=bool(getattr(char, "underscore", False)),
+            has_bg=has_bg,
+            wide_tail=(char.data == ""),
         )
 
     def get_display_lines(self) -> List[RenderedLine]:
@@ -253,6 +358,41 @@ class TerminalScreen:
     def cursor_col(self) -> int:
         return self._screen.cursor.x
 
+    def _private_mode(self, n: int) -> bool:
+        try:
+            return (n << 5) in self._screen.mode
+        except Exception:
+            return False
+
+    @property
+    def mouse_reporting(self) -> bool:
+        """True when the program asked for mouse events (ESC[?1000h / 1002h / 1003h)."""
+        return any(self._private_mode(n) for n in (1000, 1002, 1003))
+
+    @property
+    def mouse_sgr(self) -> bool:
+        return self._private_mode(1006)
+
+    @property
+    def in_alt_screen(self) -> bool:
+        return self._alt_saved is not None
+
+    @property
+    def bracketed_paste(self) -> bool:
+        """True when the program enabled bracketed paste (ESC[?2004h)."""
+        try:
+            return (2004 << 5) in self._screen.mode
+        except Exception:
+            return False
+
+    @property
+    def cursor_hidden(self) -> bool:
+        """True when the running program hid the cursor (ESC[?25l), e.g. TUIs like Claude Code."""
+        try:
+            return bool(self._screen.cursor.hidden)
+        except Exception:
+            return False
+
     @property
     def cols(self) -> int:
         return self._cols
@@ -262,10 +402,14 @@ class TerminalScreen:
         return self._rows
 
     def scroll_up(self, lines: int = 3) -> None:
+        self.selection_start = self.selection_end = None
+        if self._alt_saved is not None:
+            return
         top_len = len(self._screen.history.top) if getattr(self._screen, "history", None) else 0
         self._scroll_offset = min(self._scroll_offset + lines, top_len)
 
     def scroll_down(self, lines: int = 3) -> None:
+        self.selection_start = self.selection_end = None
         self._scroll_offset = max(0, self._scroll_offset - lines)
 
     def scroll_to_bottom(self) -> None:
@@ -291,6 +435,10 @@ class TerminalScreen:
     @property
     def is_scrolled(self) -> bool:
         return self._scroll_offset > 0
+
+    @property
+    def scroll_offset(self) -> int:
+        return self._scroll_offset
 
     def clear(self) -> None:
         """Clear the screen and scrollback."""
