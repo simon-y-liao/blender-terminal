@@ -344,13 +344,18 @@ class BAT_OT_input_modal(bpy.types.Operator):
         if not getattr(wm, "bat_terminal_active", False):
             return {"FINISHED"}
 
-        # Track terminal focus globally based on mouse clicks
-        if event.type == "LEFTMOUSE" and event.value == "PRESS":
-            is_over_term = bool(context.area and context.area.type == "TEXT_EDITOR")
-            wm.bat_terminal_focused = is_over_term
+        # Find the terminal area actually under the mouse. (context.area in a
+        # window modal handler is the area the operator started in, not the
+        # hovered one, so it cannot be used for hit-testing.)
+        area, region = _hovered_terminal(context, event)
 
-        # Only capture input when the cursor is over a TEXT_EDITOR area
-        if not context.area or context.area.type != "TEXT_EDITOR":
+        # Clicking inside the terminal focuses it, clicking anywhere else unfocuses
+        if event.type in {"LEFTMOUSE", "RIGHTMOUSE", "MIDDLEMOUSE"} and event.value == "PRESS":
+            wm.bat_terminal_focused = area is not None
+
+        # Mouse is not over the terminal: leave the event to Blender
+        # (3D viewport navigation, shortcuts, etc.)
+        if area is None:
             return {"PASS_THROUGH"}
 
         from ..terminal.manager import get_manager
@@ -362,14 +367,14 @@ class BAT_OT_input_modal(bpy.types.Operator):
             return {"PASS_THROUGH"}
 
         # ── Mouse Interaction (Scrolling & Selection) ─────────────────────
-        if context.region and context.region.type == "WINDOW":
+        if region is not None:
             is_wheel = event.type in (_SCROLL_UP_KEYS | _SCROLL_DOWN_KEYS) and event.type != "TRACKPADPAN"
             up = event.type in _SCROLL_UP_KEYS
 
             # 1. Program wants mouse events (e.g. Claude Code full-screen view):
             #    send the wheel to it, exactly like Windows Terminal does
             if is_wheel and session.screen.mouse_reporting:
-                col, row = _mouse_to_col_row(context, event, session)
+                col, row = _mouse_to_col_row(context, event, session, region)
                 btn = 64 if up else 65
                 if session.screen.mouse_sgr:
                     seq = f"\x1b[<{btn};{col + 1};{row + 1}M".encode()
@@ -391,39 +396,39 @@ class BAT_OT_input_modal(bpy.types.Operator):
                     session.screen.trackpad_scroll(delta)
                 else:
                     session.screen.scroll_up(3)
-                context.area.tag_redraw()
+                area.tag_redraw()
                 return {"RUNNING_MODAL"}
 
             if event.type in _SCROLL_DOWN_KEYS:
                 session.screen.scroll_down(3)
-                context.area.tag_redraw()
+                area.tag_redraw()
                 return {"RUNNING_MODAL"}
 
             # Text selection
             if event.type == "LEFTMOUSE":
                 if event.value == "PRESS":
                     self._is_selecting = True
-                    col, row = _mouse_to_col_row(context, event, session)
+                    col, row = _mouse_to_col_row(context, event, session, region)
                     session.screen.selection_start = (col, row)
                     session.screen.selection_end = (col, row)
-                    context.area.tag_redraw()
+                    area.tag_redraw()
                     return {"PASS_THROUGH"}
                 elif event.value == "RELEASE":
                     if self._is_selecting:
                         self._is_selecting = False
-                        col, row = _mouse_to_col_row(context, event, session)
+                        col, row = _mouse_to_col_row(context, event, session, region)
                         session.screen.selection_end = (col, row)
                         # A plain click (no drag) is not a selection
                         if session.screen.selection_start == session.screen.selection_end:
                             session.screen.selection_start = None
                             session.screen.selection_end = None
-                        context.area.tag_redraw()
+                        area.tag_redraw()
                     return {"PASS_THROUGH"}
 
             if event.type == "MOUSEMOVE" and self._is_selecting:
-                col, row = _mouse_to_col_row(context, event, session)
+                col, row = _mouse_to_col_row(context, event, session, region)
                 session.screen.selection_end = (col, row)
-                context.area.tag_redraw()
+                area.tag_redraw()
                 return {"PASS_THROUGH"}
 
         # IME / composed text input (e.g. Chinese input method)
@@ -456,7 +461,7 @@ class BAT_OT_input_modal(bpy.types.Operator):
             if text:
                 context.window_manager.clipboard = text
                 session.screen.selection_start = session.screen.selection_end = None
-                context.area.tag_redraw()
+                area.tag_redraw()
                 self.report({"INFO"}, "Terminal selection copied to clipboard")
             else:
                 # Fallback MVP: Copy the entire visible screen to clipboard
@@ -508,7 +513,25 @@ class BAT_OT_input_modal(bpy.types.Operator):
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _mouse_to_col_row(context, event, session):
+def _hovered_terminal(context, event):
+    """Return (area, region) of the Text Editor main region under the mouse, or (None, None)."""
+    window = context.window
+    screen = window.screen if window else context.screen
+    if screen is None:
+        return None, None
+    mx, my = event.mouse_x, event.mouse_y
+    for area in screen.areas:
+        if area.type != "TEXT_EDITOR":
+            continue
+        for region in area.regions:
+            if (region.type == "WINDOW"
+                    and region.x <= mx < region.x + region.width
+                    and region.y <= my < region.y + region.height):
+                return area, region
+    return None, None
+
+
+def _mouse_to_col_row(context, event, session, region=None):
     """Convert absolute screen coordinates to terminal (col, row)."""
     try:
         from .preferences import get_prefs
@@ -520,12 +543,12 @@ def _mouse_to_col_row(context, event, session):
     from ..ui.terminal_draw import _measure_char
     char_w, char_h = _measure_char(font_size, context.preferences.view.ui_scale * context.preferences.system.pixel_size)
     
-    pad_x = 10
-    pad_y = 10
-    
-    x = event.mouse_region_x
-    y = event.mouse_region_y
-    region_h = context.region.height
+    from ..ui.terminal_draw import _PAD_X as pad_x, _PAD_Y as pad_y
+
+    region = region or context.region
+    x = event.mouse_x - region.x
+    y = event.mouse_y - region.y
+    region_h = region.height
     
     row = int((region_h - pad_y - y) / char_h)
     col = int((x - pad_x) / char_w)
