@@ -229,8 +229,12 @@ def draw_terminal() -> None:
         import traceback
         err = traceback.format_exc()
         log.error("DRAW ERROR: %s\n%s", e, err)
-        with open("/tmp/bat_draw_error.txt", "w") as f:
-            f.write(err)
+        try:
+            import os, tempfile
+            with open(os.path.join(tempfile.gettempdir(), "bat_draw_error.txt"), "w") as f:
+                f.write(err)
+        except OSError:
+            pass
 
 def _draw_terminal_impl() -> None:
     """

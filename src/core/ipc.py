@@ -91,9 +91,17 @@ _server_thread: Optional[threading.Thread] = None
 _ipc_port: int = 0
 
 
+def ensure_ipc_timer() -> None:
+    """(Re)register the main-thread executor. persistent=True keeps it alive
+    across file loads; without it, bpy-exec calls hang after File > Open."""
+    if not bpy.app.timers.is_registered(_process_queue):
+        bpy.app.timers.register(_process_queue, first_interval=0.1, persistent=True)
+
+
 def start_ipc_server() -> int:
     global _server, _server_thread, _ipc_port
     if _server is not None:
+        ensure_ipc_timer()
         return _ipc_port
 
     _server = HTTPServer(("127.0.0.1", 0), IPCHandler)
@@ -102,8 +110,7 @@ def start_ipc_server() -> int:
     _server_thread = threading.Thread(target=_server.serve_forever, daemon=True)
     _server_thread.start()
 
-    if not bpy.app.timers.is_registered(_process_queue):
-        bpy.app.timers.register(_process_queue, first_interval=0.1)
+    ensure_ipc_timer()
 
     log.info("IPC Server started on port %d", _ipc_port)
     return _ipc_port
