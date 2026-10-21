@@ -167,8 +167,15 @@ class BAT_OT_open_terminal(bpy.types.Operator):
         wm = context.window_manager
 
         # If already open, just focus
-        if wm.bat_terminal_active and wm.bat_session_id:
+        if wm.bat_terminal_active and wm.bat_session_id and wm.bat_input_active:
             self.report({"INFO"}, "Terminal already open")
+            return {"FINISHED"}
+
+        # A shell from before a file load is still running: reconnect to it
+        # instead of starting a second one
+        from ..core.persistence import reattach_terminal
+        if reattach_terminal(context.window):
+            self.report({"INFO"}, "Reconnected to running terminal")
             return {"FINISHED"}
 
         # Determine terminal dimensions from the current area
