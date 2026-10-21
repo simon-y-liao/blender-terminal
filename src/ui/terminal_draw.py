@@ -159,12 +159,44 @@ def _get_ui_scale(context: bpy.types.Context) -> float:
 
 # ─── Font loading ─────────────────────────────────────────────────────────────
 
+_FONT_PATH = Path(__file__).parent.parent.parent / "fonts" / "JetBrainsMono-Regular.ttf"
+
+
+def reset_font() -> None:
+    """Forget the loaded font so it is loaded again on the next draw.
+
+    Loading a .blend can invalidate fonts loaded with blf.load(): drawing
+    with the old id then silently renders nothing, so all text disappeared
+    while glyphs drawn with Blender's UI font (id 0) were still visible.
+    """
+    global _font_id, _font_loaded
+    if _font_loaded and _font_id != 0:
+        try:
+            blf.unload(str(_FONT_PATH))
+        except Exception:
+            pass
+    _font_id = 0
+    _font_loaded = False
+
+
+def _font_usable() -> bool:
+    if _font_id == 0:
+        return True
+    try:
+        blf.size(_font_id, 12)
+        return blf.dimensions(_font_id, "M")[0] > 0
+    except Exception:
+        return False
+
+
 def _load_font() -> None:
     global _font_id, _font_loaded
     if _font_loaded:
-        return
-    # Path to the bundled JetBrains Mono font, relative to this file
-    font_path = Path(__file__).parent.parent.parent / "fonts" / "JetBrainsMono-Regular.ttf"
+        if _font_usable():
+            return
+        log.warning("Terminal font became invalid, reloading")
+        reset_font()
+    font_path = _FONT_PATH
     if font_path.is_file():
         loaded_id = blf.load(str(font_path))
         if loaded_id >= 0:
