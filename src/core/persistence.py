@@ -53,6 +53,10 @@ def reattach_terminal(window=None) -> bool:
     if session is None or not session.is_alive():
         return False
 
+    # Fonts loaded with blf.load() may not survive a file load
+    from ..ui.terminal_draw import reset_font
+    reset_font()
+
     wm = bpy.context.window_manager
     wm.bat_terminal_active = True
     wm.bat_session_id = session.session_id
