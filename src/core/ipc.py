@@ -139,48 +139,62 @@ def stop_ipc_server() -> None:
     log.info("IPC Server stopped")
 
 
-def generate_bpy_exec(port: int) -> str:
-    """
-    Generates the CLI bridge script `bpy-exec` and returns the directory 
-    it is stored in, so it can be added to the PATH.
-    """
-    bin_dir = os.path.join(tempfile.gettempdir(), "bat_ipc_bin")
-    os.makedirs(bin_dir, exist_ok=True)
-    path = os.path.join(bin_dir, "bpy-exec")
-    
-    script = f"""#!/usr/bin/env python3
-import sys, os, urllib.request, json
+_BRIDGE_SCRIPT = """import sys, os, json, urllib.request
 
-if len(sys.argv) > 1:
-    code = " ".join(sys.argv[1:])
-else:
-    code = sys.stdin.read()
+port = os.environ.get("BLENDER_IPC_PORT") or "%(port)s"
+token = os.environ.get("BLENDER_IPC_TOKEN", "")
+code = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else sys.stdin.read()
 
 req = urllib.request.Request(
-    "http://127.0.0.1:{port}/exec",
-    data=json.dumps({{"code": code}}).encode("utf-8"),
-    headers={{"Content-Type": "application/json", "X-BAT-Token": os.environ.get("BLENDER_IPC_TOKEN", "")}},
-    method="POST"
+    "http://127.0.0.1:" + port + "/exec",
+    data=json.dumps({"code": code}).encode("utf-8"),
+    headers={"Content-Type": "application/json", "X-BAT-Token": token},
+    method="POST",
 )
+# Never route the local bridge through an HTTP(S)_PROXY
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 try:
-    with urllib.request.urlopen(req) as response:
+    with opener.open(req) as response:
         res = json.loads(response.read().decode())
-        if res.get("output"):
-            print(res["output"], end="")
-        if res.get("error"):
-            print(res["error"], file=sys.stderr)
-            sys.exit(1)
 except Exception as e:
-    print(f"Blender IPC Error: {{e}}", file=sys.stderr)
+    print("Blender IPC Error: %%s" %% e, file=sys.stderr)
+    sys.exit(1)
+if res.get("output"):
+    print(res["output"], end="")
+if res.get("error"):
+    print(res["error"], file=sys.stderr)
     sys.exit(1)
 """
-    with open(path, "w") as f:
-        f.write(script)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-    
-    # Windows compatibility wrapper
+
+
+def generate_bpy_exec(port: int) -> str:
+    """
+    Generate the CLI bridge `bpy-exec` and return its directory (for PATH).
+
+    One directory per Blender process: a shared directory with the port
+    baked in meant a second Blender instance overwrote the first one's
+    bridge, so `bpy-exec` in the first terminal ran code in the other
+    Blender. The script also prefers BLENDER_IPC_PORT from the environment.
+    Wrappers call Blender's bundled Python, so no system Python is needed.
+    """
+    bin_dir = os.path.join(tempfile.gettempdir(), f"bat_ipc_bin_{os.getpid()}")
+    os.makedirs(bin_dir, exist_ok=True)
+
+    py_path = os.path.join(bin_dir, "bpy_exec.py")
+    with open(py_path, "w", encoding="utf-8") as f:
+        f.write(_BRIDGE_SCRIPT % {"port": port})
+
+    python = sys.executable or "python"
+
+    # POSIX shells (macOS/Linux, Git Bash on Windows)
+    sh_path = os.path.join(bin_dir, "bpy-exec")
+    with open(sh_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (python.replace("\\", "/"), py_path.replace("\\", "/")))
+    os.chmod(sh_path, os.stat(sh_path).st_mode | stat.S_IEXEC)
+
+    # Windows cmd / PowerShell
     cmd_path = os.path.join(bin_dir, "bpy-exec.cmd")
-    with open(cmd_path, "w") as f:
-        f.write('@echo off\r\npython "%~dp0\\bpy-exec" %*\r\n')
-    
+    with open(cmd_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write('@echo off\n"%s" "%s" %%*\n' % (python, py_path))
+
     return bin_dir

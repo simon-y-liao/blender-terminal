@@ -157,6 +157,16 @@ def get_user_env() -> Dict[str, str]:
     except Exception as e:
         log.error("Failed to start IPC server: %s", e)
 
+    # ─── BlenderMCP: bind tools started here to *this* Blender ───
+    try:
+        from ..integrations.blender_mcp import ensure_instance_port
+        mcp_port = ensure_instance_port()
+        if mcp_port is not None:
+            env["BLENDER_HOST"] = "localhost"
+            env["BLENDER_PORT"] = str(mcp_port)
+    except Exception as e:
+        log.error("BlenderMCP integration failed: %s", e)
+
     return env
 
 
