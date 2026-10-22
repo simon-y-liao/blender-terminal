@@ -47,8 +47,19 @@ def ensure_instance_port() -> Optional[int]:
     Never returns a port that another Blender is listening on.
     """
     scene = getattr(bpy.context, "scene", None)
-    if scene is None or not hasattr(scene, "blendermcp_port"):
-        return None  # add-on not installed / enabled
+    if scene is None:
+        return None
+    if not hasattr(scene, "blendermcp_port"):
+        # Add-on not enabled in this Blender. If another Blender serves
+        # BlenderMCP on the default port, a blender-mcp started here would
+        # silently control *that* instance. Point it at an unused port so it
+        # fails visibly instead.
+        if _listening(9876):
+            port = _free_port(9877)
+            log.warning("BlenderMCP is not enabled in this Blender; "
+                        "terminal bound to unused port %s", port)
+            return port
+        return None
 
     server = getattr(bpy.types, "blendermcp_server", None)
 
