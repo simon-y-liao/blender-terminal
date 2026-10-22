@@ -103,6 +103,15 @@ class TerminalSession:
         )
 
         if ok:
+            from ..process import discovery
+            binding = discovery.last_mcp_binding
+            if binding:
+                port, source = binding
+                label = {"lab": "Blender MCP", "blendermcp": "BlenderMCP"}.get(source)
+                if label:
+                    self._inject_info(f"{label} in this terminal connects to this Blender (port {port})")
+                else:
+                    self._inject_info(f"No Blender MCP add-on enabled in this Blender; MCP tools here will not reach other Blenders")
             self._backend = backend
             self.screen.response_handler = backend.write
             log.info("Session %s started: %s", self.session_id, cmd)
@@ -190,6 +199,10 @@ class TerminalSession:
         else:
             from .unix_pty import UnixPTYBackend
             return UnixPTYBackend(on_output=self.output_queue.put)
+
+    def _inject_info(self, message: str) -> None:
+        """Write a dim informational line into the pyte screen."""
+        self.screen.feed(f"\033[90m[Terminal] {message}\033[0m\r\n".encode())
 
     def _inject_error(self, message: str) -> None:
         """Write an error message directly into the pyte screen."""

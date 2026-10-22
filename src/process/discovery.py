@@ -122,6 +122,10 @@ def get_default_shell() -> str:
     return "/bin/sh"
 
 
+# (port, source) exported to the most recently started terminal, for display
+last_mcp_binding = None
+
+
 def get_user_env() -> Dict[str, str]:
     """
     Return a clean copy of os.environ suitable for subprocess use.
@@ -157,13 +161,19 @@ def get_user_env() -> Dict[str, str]:
     except Exception as e:
         log.error("Failed to start IPC server: %s", e)
 
-    # ─── BlenderMCP: bind tools started here to *this* Blender ───
+    # ─── Blender MCP add-ons: bind tools started here to *this* Blender ───
+    global last_mcp_binding
+    last_mcp_binding = None
     try:
         from ..integrations.blender_mcp import ensure_instance_port
-        mcp_port = ensure_instance_port()
+        mcp_port, source = ensure_instance_port()
         if mcp_port is not None:
-            env["BLENDER_HOST"] = "localhost"
-            env["BLENDER_PORT"] = str(mcp_port)
+            # Blender Lab MCP server (blmcp) and BlenderMCP (ahujasid)
+            for key in ("BLENDER_MCP_HOST", "BLENDER_HOST"):
+                env[key] = "localhost"
+            for key in ("BLENDER_MCP_PORT", "BLENDER_PORT"):
+                env[key] = str(mcp_port)
+            last_mcp_binding = (mcp_port, source)
     except Exception as e:
         log.error("BlenderMCP integration failed: %s", e)
 
