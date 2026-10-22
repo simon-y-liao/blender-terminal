@@ -117,6 +117,8 @@ def register() -> None:
 
     register_props()
     register_pump_timer()
+    from .src.core.persistence import register_handlers
+    register_handlers()
     register_keymaps()
     bpy.types.TOPBAR_MT_window.append(draw_window_menu)
     bpy.types.TEXT_HT_header.append(draw_header_menu)
@@ -140,6 +142,8 @@ def unregister() -> None:
 
     log.info("Unregistering Blender Interactive Terminal")
 
+    from .src.core.persistence import unregister_handlers
+    unregister_handlers()
     unregister_pump_timer()
     unregister_draw_handler()
     destroy_manager()

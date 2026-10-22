@@ -34,7 +34,6 @@ class BAT_MT_terminal_menu(Menu):
             layout.operator("bat.kill_process", text="Kill Process", icon="X")
         
         layout.separator()
-        layout.operator("bat.update_extension", text="Sync Updates", icon="FILE_REFRESH")
         
         layout.separator()
         layout.menu("BAT_MT_terminal_usage", text="Usage", icon="QUESTION")
@@ -49,7 +48,7 @@ class BAT_MT_terminal_usage(Menu):
         layout = self.layout
         layout.label(text="Click inside the terminal to focus and type.", icon="MOUSE_LMB")
         layout.separator()
-        layout.label(text="Cmd+T / Ctrl+T — Toggle floating window")
+        layout.label(text="Cmd+T / Win+T — Toggle floating window")
         layout.label(text="Ctrl+C — Interrupt process")
         layout.label(text="Ctrl+D — Send EOF")
         layout.label(text="Ctrl+L — Clear screen")

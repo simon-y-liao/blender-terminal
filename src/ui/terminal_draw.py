@@ -159,12 +159,44 @@ def _get_ui_scale(context: bpy.types.Context) -> float:
 
 # ─── Font loading ─────────────────────────────────────────────────────────────
 
+_FONT_PATH = Path(__file__).parent.parent.parent / "fonts" / "JetBrainsMono-Regular.ttf"
+
+
+def reset_font() -> None:
+    """Forget the loaded font so it is loaded again on the next draw.
+
+    Loading a .blend can invalidate fonts loaded with blf.load(): drawing
+    with the old id then silently renders nothing, so all text disappeared
+    while glyphs drawn with Blender's UI font (id 0) were still visible.
+    """
+    global _font_id, _font_loaded
+    if _font_loaded and _font_id != 0:
+        try:
+            blf.unload(str(_FONT_PATH))
+        except Exception:
+            pass
+    _font_id = 0
+    _font_loaded = False
+
+
+def _font_usable() -> bool:
+    if _font_id == 0:
+        return True
+    try:
+        blf.size(_font_id, 12)
+        return blf.dimensions(_font_id, "M")[0] > 0
+    except Exception:
+        return False
+
+
 def _load_font() -> None:
     global _font_id, _font_loaded
     if _font_loaded:
-        return
-    # Path to the bundled JetBrains Mono font, relative to this file
-    font_path = Path(__file__).parent.parent.parent / "fonts" / "JetBrainsMono-Regular.ttf"
+        if _font_usable():
+            return
+        log.warning("Terminal font became invalid, reloading")
+        reset_font()
+    font_path = _FONT_PATH
     if font_path.is_file():
         loaded_id = blf.load(str(font_path))
         if loaded_id >= 0:
@@ -178,16 +210,28 @@ def _load_font() -> None:
     log.warning("JetBrains Mono not found, using default font (grid may not align)")
 
 
+def _get_spacing() -> Tuple[float, float]:
+    try:
+        from ..blender.preferences import get_prefs
+        prefs = get_prefs(bpy.context)
+        if prefs:
+            return float(prefs.line_spacing), float(prefs.letter_spacing)
+    except Exception:
+        pass
+    return 1.35, 0.0
+
+
 def _measure_char(font_size: int, ui_scale: float = 1.0) -> Tuple[float, float]:
-    """Measure a representative monospace character cell."""
+    """Measure a monospace character cell (advance width x line height)."""
     _load_font()
     scaled_size = int(font_size * ui_scale)
     blf.size(_font_id, scaled_size)
-    w, h = blf.dimensions(_font_id, "M")
+    w, _ = blf.dimensions(_font_id, "M")
     if w <= 0:
         w = scaled_size * 0.6
-    if h <= 0:
-        h = scaled_size * 1.4
+    line_spacing, letter_spacing = _get_spacing()
+    w += letter_spacing * ui_scale
+    h = scaled_size * line_spacing
     return w, h
 
 
@@ -229,8 +273,12 @@ def draw_terminal() -> None:
         import traceback
         err = traceback.format_exc()
         log.error("DRAW ERROR: %s\n%s", e, err)
-        with open("/tmp/bat_draw_error.txt", "w") as f:
-            f.write(err)
+        try:
+            import os, tempfile
+            with open(os.path.join(tempfile.gettempdir(), "bat_draw_error.txt"), "w") as f:
+                f.write(err)
+        except OSError:
+            pass
 
 def _draw_terminal_impl() -> None:
     """
@@ -309,7 +357,8 @@ def _draw_terminal_impl() -> None:
         _render_line(line, y, char_w, char_h, scaled_font_size, _PAD_X)
 
     # ── Draw text selection ────────────────────────────────────────────────
-    if session.screen.selection_start and session.screen.selection_end:
+    if (session.screen.selection_start and session.screen.selection_end
+            and session.screen.selection_start != session.screen.selection_end):
         c1, r1 = session.screen.selection_start
         c2, r2 = session.screen.selection_end
         if r1 > r2 or (r1 == r2 and c1 > c2):
@@ -337,7 +386,7 @@ def _draw_terminal_impl() -> None:
     # ── Draw PTY cursor ────────────────────────────────────────────────────
     t = time.monotonic()
     cursor_on = (int(t / (_CURSOR_BLINK_PERIOD / 2)) % 2) == 0
-    if cursor_on and session.is_alive() and wm.bat_input_active:
+    if cursor_on and session.is_alive() and wm.bat_input_active and not session.screen.cursor_hidden and not session.screen.is_scrolled:
         cur_row = session.screen.cursor_row
         cur_col = session.screen.cursor_col
         cx = _PAD_X + cur_col * char_w
@@ -351,6 +400,18 @@ def _draw_terminal_impl() -> None:
                 cursor_color[3] = 0.6
             _draw_rect(cx, cy, char_w, char_h, tuple(cursor_color))
 
+    # ── Scrollback indicator ───────────────────────────────────────────────
+    if session.screen.is_scrolled:
+        label = f" ↑ {session.screen.scroll_offset} lines  (type or scroll down to return) "
+        blf.size(_font_id, scaled_font_size)
+        lw, _ = blf.dimensions(_font_id, label)
+        lx = rw - lw - _PAD_X
+        ly = _PAD_Y
+        _draw_rect(lx - 4, ly, lw + 8, char_h, (0.2, 0.4, 0.8, 0.85))
+        blf.color(_font_id, 1.0, 1.0, 1.0, 1.0)
+        blf.position(_font_id, lx, ly + (char_h - scaled_font_size) * 0.5 + scaled_font_size * 0.22, 0)
+        blf.draw(_font_id, label)
+
 
 def _render_line(
     line: RenderedLine,
@@ -361,39 +422,76 @@ def _render_line(
     pad_x: float,
 ) -> None:
     """
-    Render a single RenderedLine using blf.
-    Consecutive characters with the same fg color are batched into
-    one blf.draw() call for performance.
+    Render one terminal row: background colours and text.
+    ASCII runs of the same colour are drawn in one blf.draw() call; rows with
+    wide (CJK) or other non-ASCII characters are drawn cell by cell so every
+    character lands exactly on its grid column.
     """
     if not line:
         return
 
+    cell_y = y
+
+    # 1. Background runs (also used for inverse video)
+    run_start = None
+    run_bg = None
+    for col_idx in range(len(line) + 1):
+        rc = line[col_idx] if col_idx < len(line) else None
+        bg = rc.bg if (rc is not None and rc.has_bg) else None
+        if bg != run_bg:
+            if run_bg is not None:
+                # Snap to whole pixels so adjacent rows touch without seams
+                x0 = math.floor(pad_x + run_start * char_w)
+                x1 = math.ceil(pad_x + col_idx * char_w)
+                y0 = math.floor(cell_y)
+                y1 = math.ceil(cell_y + char_h)
+                _draw_rect(x0, y0, x1 - x0, y1 - y0, run_bg)
+            run_start, run_bg = col_idx, bg
+
     blf.size(_font_id, scaled_font_size)
+    natural_w, _ = blf.dimensions(_font_id, "M")
+    baseline = cell_y + (char_h - scaled_font_size) * 0.5 + scaled_font_size * 0.22
+    per_char = abs(char_w - natural_w) > 0.5 or any(
+        rc.wide_tail or (rc.char and ord(rc.char[0]) > 0x7E) for rc in line)
 
-    # Group consecutive chars by color
-    batch_start = 0
-    batch_fg = line[0].fg
-    batch_chars = []
+    # 2. Text
+    if per_char:
+        from .font_coverage import has_glyph
+        fallback_ready = False
+        for col_idx, rc in enumerate(line):
+            if rc.wide_tail or not rc.char or rc.char == " ":
+                continue
+            fid = _font_id
+            if _font_id != 0 and not has_glyph(rc.char[0]):
+                # Glyph missing in JetBrains Mono (CJK, some symbols):
+                # use Blender's UI font, which has a Unicode fallback stack
+                fid = 0
+                if not fallback_ready:
+                    blf.size(0, scaled_font_size)
+                    fallback_ready = True
+            blf.color(fid, *rc.fg)
+            blf.position(fid, pad_x + col_idx * char_w, baseline, 0)
+            blf.draw(fid, rc.char)
+    else:
+        batch_start = 0
+        batch_fg = line[0].fg
+        batch_chars = []
 
-    def flush_batch(end_col: int):
-        if not batch_chars:
-            return
-        text = "".join(batch_chars)
-        x = pad_x + batch_start * char_w
-        blf.color(_font_id, *batch_fg)
-        blf.position(_font_id, x, y, 0)
-        blf.draw(_font_id, text)
+        def flush():
+            text = "".join(batch_chars)
+            if text.strip():
+                blf.color(_font_id, *batch_fg)
+                blf.position(_font_id, pad_x + batch_start * char_w, baseline, 0)
+                blf.draw(_font_id, text)
 
-    for col_idx, rchar in enumerate(line):
-        if rchar.fg != batch_fg:
-            flush_batch(col_idx)
-            batch_start = col_idx
-            batch_fg = rchar.fg
-            batch_chars = [rchar.char]
-        else:
-            batch_chars.append(rchar.char)
-
-    flush_batch(len(line))
+        for col_idx, rc in enumerate(line):
+            ch = rc.char or " "
+            if rc.fg != batch_fg:
+                flush()
+                batch_start, batch_fg, batch_chars = col_idx, rc.fg, [ch]
+            else:
+                batch_chars.append(ch)
+        flush()
 
 
 def _truncate_path(path: str, max_len: int = 40) -> str:
