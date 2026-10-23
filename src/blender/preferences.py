@@ -78,7 +78,7 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
             "reuse a Text Editor area or split one off the 3D Viewport, and "
             "start a shell (or reconnect to the one still running)"
         ),
-        default=False,
+        default=True,
     )  # type: ignore
 
     cursor_blink: BoolProperty(
