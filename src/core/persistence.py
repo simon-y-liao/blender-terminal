@@ -72,18 +72,92 @@ def reattach_terminal(window=None) -> bool:
     return True
 
 
+def _auto_open_enabled() -> bool:
+    try:
+        from ..blender.preferences import get_prefs
+        prefs = get_prefs(bpy.context)
+        return bool(prefs and prefs.auto_open)
+    except Exception:
+        return False
+
+
+def _main_window():
+    wm = bpy.context.window_manager
+    return bpy.context.window or (wm.windows[0] if wm.windows else None)
+
+
+def _find_or_make_text_area(window):
+    """Return a Text Editor area in this window, splitting one off the
+    largest 3D Viewport (right-hand 35%) if there is none."""
+    screen = window.screen
+    for area in screen.areas:
+        if area.type == "TEXT_EDITOR":
+            return area
+
+    candidates = [a for a in screen.areas if a.type == "VIEW_3D"] or list(screen.areas)
+    if not candidates:
+        return None
+    target = max(candidates, key=lambda a: a.width * a.height)
+    region = next((r for r in target.regions if r.type == "WINDOW"), None)
+    before = set(a.as_pointer() for a in screen.areas)
+    with bpy.context.temp_override(window=window, screen=screen, area=target, region=region):
+        bpy.ops.screen.area_split(direction="VERTICAL", factor=0.65)
+    new_areas = [a for a in screen.areas if a.as_pointer() not in before]
+    if not new_areas:
+        return None
+    # Of the two halves, use the right-hand one for the terminal
+    pair = [target, new_areas[0]]
+    right = max(pair, key=lambda a: a.x)
+    right.type = "TEXT_EDITOR"
+    return right
+
+
+def show_terminal(open_new: bool) -> bool:
+    """Make sure the terminal is visible: reattach to a running session or,
+    if open_new, start one. Creates a Text Editor area when needed."""
+    window = _main_window()
+    if window is None:
+        return False
+    area = _find_or_make_text_area(window)
+    if area is None:
+        return False
+
+    if reattach_terminal(window):
+        area.tag_redraw()
+        return True
+    if not open_new:
+        return False
+
+    region = next((r for r in area.regions if r.type == "WINDOW"), None)
+    with bpy.context.temp_override(window=window, screen=window.screen, area=area, region=region):
+        bpy.ops.bat.open_terminal("INVOKE_DEFAULT")
+    return True
+
+
 def _deferred_reattach():
     try:
-        reattach_terminal()
+        if _auto_open_enabled() and not bpy.app.background:
+            show_terminal(open_new=True)
+        else:
+            reattach_terminal()
     except Exception as exc:
         log.error("Terminal re-attach failed: %s", exc)
     return None  # run once
 
 
+def schedule_auto_open(delay: float = 1.0) -> None:
+    """Called at add-on registration (Blender startup)."""
+    if bpy.app.background or not _auto_open_enabled():
+        return
+    if not bpy.app.timers.is_registered(_deferred_reattach):
+        bpy.app.timers.register(_deferred_reattach, first_interval=delay, persistent=True)
+
+
 @persistent
 def _on_load_post(*_args) -> None:
     # Wait until the new file's windows and screens are ready
-    bpy.app.timers.register(_deferred_reattach, first_interval=0.2, persistent=True)
+    if not bpy.app.timers.is_registered(_deferred_reattach):
+        bpy.app.timers.register(_deferred_reattach, first_interval=0.2, persistent=True)
 
 
 def register_handlers() -> None:
