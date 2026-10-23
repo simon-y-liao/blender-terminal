@@ -117,8 +117,9 @@ def register() -> None:
 
     register_props()
     register_pump_timer()
-    from .src.core.persistence import register_handlers
+    from .src.core.persistence import register_handlers, schedule_auto_open
     register_handlers()
+    schedule_auto_open()
     register_keymaps()
     bpy.types.TOPBAR_MT_window.append(draw_window_menu)
     bpy.types.TEXT_HT_header.append(draw_header_menu)

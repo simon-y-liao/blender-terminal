@@ -71,6 +71,16 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
         max=10000,
     )  # type: ignore
 
+    auto_open: BoolProperty(
+        name="Open Terminal Automatically",
+        description=(
+            "When Blender starts or a file is opened, show the terminal: "
+            "reuse a Text Editor area or split one off the 3D Viewport, and "
+            "start a shell (or reconnect to the one still running)"
+        ),
+        default=False,
+    )  # type: ignore
+
     cursor_blink: BoolProperty(
         name="Blink Cursor",
         description="Enable terminal cursor blinking",
@@ -90,6 +100,7 @@ class BATAddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "shell")
         col.prop(self, "max_scrollback")
         col.prop(self, "cursor_blink")
+        col.prop(self, "auto_open")
 
 
 def get_prefs(context: bpy.types.Context) -> BATAddonPreferences:
